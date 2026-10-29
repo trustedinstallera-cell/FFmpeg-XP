@@ -6349,8 +6349,8 @@ probe_libc(){
         if ! test_${pfx}cpp_condition crtdefs.h "defined(_UCRT)"; then
             add_${pfx}cppflags -D__USE_MINGW_ANSI_STDIO=1
         fi
-        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0601" &&
-            add_${pfx}cppflags -D_WIN32_WINNT=0x0601
+        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0501" &&
+            add_${pfx}cppflags -D_WIN32_WINNT=0x0501
         add_${pfx}cppflags -D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600
     elif test_${pfx}cpp_condition _mingw.h "defined __MINGW_VERSION"  ||
          test_${pfx}cpp_condition _mingw.h "defined __MINGW32_VERSION"; then
@@ -6364,14 +6364,14 @@ probe_libc(){
         fi
         test_${pfx}cpp_condition _mingw.h "__MSVCRT_VERSION__ < 0x0700" &&
             add_${pfx}cppflags -D__MSVCRT_VERSION__=0x0700
-        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0601" &&
-            add_${pfx}cppflags -D_WIN32_WINNT=0x0601
+        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0501" &&
+            add_${pfx}cppflags -D_WIN32_WINNT=0x0501
         add_${pfx}cppflags -D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600
     elif test_${pfx}cpp_condition crtversion.h "defined _VC_CRT_MAJOR_VERSION"; then
         eval ${pfx}libc_type=msvcrt
         add_${pfx}cppflags -D_USE_MATH_DEFINES -D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_WARNINGS
-        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0601" &&
-            add_${pfx}cppflags -D_WIN32_WINNT=0x0601
+        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0501" &&
+            add_${pfx}cppflags -D_WIN32_WINNT=0x0501
     elif test_${pfx}cpp_condition stddef.h "defined __KLIBC__"; then
         eval ${pfx}libc_type=klibc
     elif test_${pfx}cpp_condition sys/cdefs.h "defined __BIONIC__"; then

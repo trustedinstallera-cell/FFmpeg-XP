@@ -1,244 +1,201 @@
 /*
- * Copyright (C) 2010-2011 x264 project
- *
- * Authors: Steven Walters <kemuri9@gmail.com>
- *          Pegasys Inc. <http://www.pegasys-inc.com>
- *
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
-
-/**
- * @file
- * w32threads to pthreads wrapper
+ * w32pthreads compat layer - XP compatible version
+ * No SRW Locks, no Vista+ APIs, with lazy CS initialization
+ * pthread_once emulated via InterlockedCompareExchange
  */
 
 #ifndef COMPAT_W32PTHREADS_H
 #define COMPAT_W32PTHREADS_H
 
-/* Build up a pthread-like API using underlying Windows API. Have only static
- * methods so as to not conflict with a potentially linked in pthread-win32
- * library.
- * As most functions here are used without checking return values,
- * only implement return values as necessary. */
-
 #include <windows.h>
+#include <errno.h>
 #include <process.h>
 #include <time.h>
 
-#include "libavutil/attributes.h"
-#include "libavutil/common.h"
-#include "libavutil/internal.h"
-#include "libavutil/mem.h"
-#include "libavutil/time.h"
-#include "libavutil/wchar_filename.h"
+typedef struct {
+    CRITICAL_SECTION cs;
+} pthread_mutex_t;
 
-typedef struct w32pthread_t {
-    void *handle;
-    void *(*func)(void* arg);
+#define PTHREAD_MUTEX_INITIALIZER { { 0 } }
+
+typedef struct {
+    HANDLE event;
+} pthread_cond_t;
+
+#define PTHREAD_COND_INITIALIZER { NULL }
+
+typedef struct {
+    HANDLE thread;
+    void *(*start_routine)(void *);
     void *arg;
-    void *ret;
-} *pthread_t;
+} pthread_t;
 
-/* use light weight mutex/condition variable API */
-typedef SRWLOCK pthread_mutex_t;
-typedef CONDITION_VARIABLE pthread_cond_t;
+/* ---- Mutex ---- */
 
-#define PTHREAD_MUTEX_INITIALIZER SRWLOCK_INIT
-#define PTHREAD_COND_INITIALIZER CONDITION_VARIABLE_INIT
-
-#define InitializeCriticalSection(x) InitializeCriticalSectionEx(x, 0, 0)
-#define WaitForSingleObject(a, b) WaitForSingleObjectEx(a, b, FALSE)
-
-#if HAVE_WINRT
-#define THREADFUNC_RETTYPE DWORD
-#else
-#define THREADFUNC_RETTYPE unsigned
-#endif
-
-av_unused static THREADFUNC_RETTYPE
-__stdcall attribute_align_arg win32thread_worker(void *arg)
+static inline int pthread_mutex_init(pthread_mutex_t *m, void *attr)
 {
-    pthread_t h = (pthread_t)arg;
-    h->ret = h->func(h->arg);
+    (void)attr;
+    InitializeCriticalSection(&m->cs);
     return 0;
 }
 
-av_unused static int pthread_create(pthread_t *thread, const void *unused_attr,
-                                    void *(*start_routine)(void*), void *arg)
-{
-    pthread_t ret;
-
-    ret = (pthread_t)av_mallocz(sizeof(*ret));
-    if (!ret)
-        return EAGAIN;
-
-    ret->func   = start_routine;
-    ret->arg    = arg;
-#if HAVE_WINRT
-    ret->handle = (void*)CreateThread(NULL, 0, win32thread_worker, ret,
-                                      0, NULL);
-#else
-    ret->handle = (void*)_beginthreadex(NULL, 0, win32thread_worker, ret,
-                                        0, NULL);
-#endif
-
-    if (!ret->handle) {
-        av_free(ret);
-        return EAGAIN;
-    }
-
-    *thread = ret;
-
-    return 0;
-}
-
-av_unused static int pthread_join(pthread_t thread, void **value_ptr)
-{
-    DWORD ret = WaitForSingleObject(thread->handle, INFINITE);
-    if (ret != WAIT_OBJECT_0) {
-        if (ret == WAIT_ABANDONED)
-            return EINVAL;
-        else
-            return EDEADLK;
-    }
-    if (value_ptr)
-        *value_ptr = thread->ret;
-    CloseHandle(thread->handle);
-    av_free(thread);
-    return 0;
-}
-
-static inline int pthread_mutex_init(pthread_mutex_t *m, void* attr)
-{
-    InitializeSRWLock(m);
-    return 0;
-}
-static inline int pthread_mutex_destroy(pthread_mutex_t *m)
-{
-    /* Unlocked SWR locks use no resources */
-    return 0;
-}
 static inline int pthread_mutex_lock(pthread_mutex_t *m)
 {
-    AcquireSRWLockExclusive(m);
-    return 0;
-}
-static inline int pthread_mutex_unlock(pthread_mutex_t *m)
-{
-    ReleaseSRWLockExclusive(m);
+    if (!m->cs.DebugInfo)
+        InitializeCriticalSection(&m->cs);
+    EnterCriticalSection(&m->cs);
     return 0;
 }
 
 static inline int pthread_mutex_trylock(pthread_mutex_t *m)
 {
-    return TryAcquireSRWLockExclusive(m) == 0 ? EBUSY : 0;
+    if (!m->cs.DebugInfo)
+        InitializeCriticalSection(&m->cs);
+    return TryEnterCriticalSection(&m->cs) ? 0 : EBUSY;
 }
 
-typedef INIT_ONCE pthread_once_t;
-#define PTHREAD_ONCE_INIT INIT_ONCE_STATIC_INIT
-
-av_unused static int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
+static inline int pthread_mutex_unlock(pthread_mutex_t *m)
 {
-    BOOL pending = FALSE;
-    InitOnceBeginInitialize(once_control, 0, &pending, NULL);
-    if (pending)
-        init_routine();
-    InitOnceComplete(once_control, 0, NULL);
+    LeaveCriticalSection(&m->cs);
     return 0;
 }
 
-static inline int pthread_cond_init(pthread_cond_t *cond, const void *unused_attr)
+static inline int pthread_mutex_destroy(pthread_mutex_t *m)
 {
-    InitializeConditionVariable(cond);
+    DeleteCriticalSection(&m->cs);
     return 0;
 }
 
-/* native condition variables do not destroy */
-static inline int pthread_cond_destroy(pthread_cond_t *cond)
+/* ---- CondVar (emulated via Event) ---- */
+
+static inline int pthread_cond_init(pthread_cond_t *c, void *attr)
 {
+    (void)attr;
+    c->event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (!c->event) return ENOMEM;
     return 0;
 }
 
-static inline int pthread_cond_broadcast(pthread_cond_t *cond)
+static inline int pthread_cond_signal(pthread_cond_t *c)
 {
-    WakeAllConditionVariable(cond);
+    if (!c->event) return EINVAL;
+    SetEvent(c->event);
     return 0;
 }
 
-static inline int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
+static inline int pthread_cond_broadcast(pthread_cond_t *c)
 {
-    SleepConditionVariableSRW(cond, mutex, INFINITE, 0);
+    if (!c->event) return EINVAL;
+    SetEvent(c->event);
     return 0;
 }
 
-static inline int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
-                                         const struct timespec *abstime)
+static inline int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m)
 {
-    int64_t abs_milli = abstime->tv_sec * 1000LL + abstime->tv_nsec / 1000000;
-    DWORD t = av_clip64(abs_milli - av_gettime() / 1000, 0, UINT32_MAX);
+    if (!c->event) return EINVAL;
+    pthread_mutex_unlock(m);
+    WaitForSingleObject(c->event, INFINITE);
+    pthread_mutex_lock(m);
+    return 0;
+}
 
-    if (!SleepConditionVariableSRW(cond, mutex, t, 0)) {
-        DWORD err = GetLastError();
-        if (err == ERROR_TIMEOUT)
-            return ETIMEDOUT;
-        else
-            return EINVAL;
+static inline int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
+                                          const void *abstime)
+{
+    DWORD ms = INFINITE;
+    (void)abstime;
+    if (!c->event) return EINVAL;
+    pthread_mutex_unlock(m);
+    WaitForSingleObject(c->event, ms);
+    pthread_mutex_lock(m);
+    return 0;
+}
+
+static inline int pthread_cond_destroy(pthread_cond_t *c)
+{
+    if (c->event) {
+        CloseHandle(c->event);
+        c->event = NULL;
     }
     return 0;
 }
 
-static inline int pthread_cond_signal(pthread_cond_t *cond)
+/* ---- Thread ---- */
+
+static unsigned __stdcall pthread_start_wrapper(void *arg)
 {
-    WakeConditionVariable(cond);
+    pthread_t *t = (pthread_t *)arg;
+    t->start_routine(t->arg);
     return 0;
 }
 
-static inline int win32_thread_setname(const char *name)
+static inline int pthread_create(pthread_t *t, void *attr,
+                                 void *(*start_routine)(void *), void *arg)
 {
-#if !HAVE_UWP
-    typedef HRESULT (WINAPI *SetThreadDescriptionFn)(HANDLE, PCWSTR);
-
-    // Although SetThreadDescription lives in kernel32.dll, on Windows Server 2016,
-    // Windows 10 LTSB 2016 and Windows 10 version 1607, it was only available in
-    // kernelbase.dll. So, load it from there for maximum coverage.
-    HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
-    if (!kernelbase)
-        return AVERROR(ENOSYS);
-
-    SetThreadDescriptionFn pSetThreadDescription =
-        (SetThreadDescriptionFn)GetProcAddress(kernelbase, "SetThreadDescription");
-    if (!pSetThreadDescription)
-        return AVERROR(ENOSYS);
-
-    wchar_t *wname;
-    if (utf8towchar(name, &wname) < 0)
-        return AVERROR(ENOMEM);
-
-    HRESULT hr = pSetThreadDescription(GetCurrentThread(), wname);
-    av_free(wname);
-    return SUCCEEDED(hr) ? 0 : AVERROR(EINVAL);
-#else
-    // UWP is not supported because we cannot use LoadLibrary/GetProcAddress to
-    // detect the availability of the SetThreadDescription API. There is a small
-    // gap in Windows builds 1507-1607 where it was not available. UWP allows
-    // querying the availability of APIs with QueryOptionalDelayLoadedAPI, but it
-    // requires /DELAYLOAD:kernel32.dll during linking, and we cannot enforce that.
-    return AVERROR(ENOSYS);
-#endif
+    (void)attr;
+    t->start_routine = start_routine;
+    t->arg = arg;
+    t->thread = (HANDLE)_beginthreadex(NULL, 0, pthread_start_wrapper, t, 0, NULL);
+    if (!t->thread) return EAGAIN;
+    return 0;
 }
+
+static inline int pthread_join(pthread_t t, void **retval)
+{
+    (void)retval;
+    WaitForSingleObject(t.thread, INFINITE);
+    CloseHandle(t.thread);
+    return 0;
+}
+
+static inline int pthread_detach(pthread_t t)
+{
+    CloseHandle(t.thread);
+    return 0;
+}
+
+static inline void pthread_exit(void *retval)
+{
+    (void)retval;
+    _endthreadex(0);
+}
+
+static inline pthread_t pthread_self(void)
+{
+    pthread_t t;
+    t.thread = GetCurrentThread();
+    t.start_routine = NULL;
+    t.arg = NULL;
+    return t;
+}
+
+/* ---- pthread_once (XP-compatible, no INIT_ONCE) ---- */
+
+typedef volatile LONG pthread_once_t;
+#define PTHREAD_ONCE_INIT 0
+
+static inline int pthread_once(pthread_once_t *once, void (*func)(void))
+{
+    if (*once == 0) {
+        /* Try to be the one to run init.
+         * InterlockedCompareExchange returns the previous value.
+         * If previous was 0, we won the race.
+         */
+        if (InterlockedCompareExchange(once, 1, 0) == 0) {
+            func();
+            InterlockedExchange(once, 2); /* mark as done */
+        } else {
+            /* Another thread is running init, spin-wait */
+            while (*once == 1) {
+                Sleep(1);
+            }
+        }
+    }
+    return 0;
+}
+
+/* ---- Misc ---- */
+
+#define pthread_equal(a, b) ((a).thread == (b).thread)
 
 #endif /* COMPAT_W32PTHREADS_H */
